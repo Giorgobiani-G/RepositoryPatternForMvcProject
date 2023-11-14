@@ -1,6 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using MvcRepository.Exceptions;
+using Syllogia.Common.EntityFrameworkCore.Extensions;
 using System.Linq.Expressions;
-using System.Reflection;
 
 namespace MvcRepository.Repository
 {
@@ -19,26 +20,9 @@ namespace MvcRepository.Repository
 
         public async Task<TEntity> GetByIdAsync(int id, string[]? includeProperties = null, CancellationToken cancellationToken = default)
         {
-            if (includeProperties is not null)
-            {
-                Type type = typeof(TEntity);
-                string pkName = type.GetProperties().ElementAt(0).Name;
+            var predicate = GenerarateExpressions.Predicate<TEntity>(id);
 
-                ParameterExpression pe = Expression.Parameter(type, "x");
-                MemberExpression me = Expression.Property(pe, pkName);
-                ConstantExpression idPar = Expression.Constant(id);
-                BinaryExpression body = Expression.Equal(me, idPar);
-                Expression<Func<TEntity, bool>> lambda = Expression.Lambda<Func<TEntity, bool>>(body, new[] { pe });
-
-                IQueryable<TEntity> query = _table;
-
-                foreach (string includeProperty in includeProperties)
-                    query = query.Include(includeProperty);
-
-                return await query.FirstAsync(lambda, cancellationToken);
-            }
-
-            var entity = await _table.FindAsync(new object[] { id }, cancellationToken);
+            var entity = await _table.ApplyIncludes(includeProperties).AsNoTracking().FirstOrDefaultAsync(predicate, cancellationToken);
 
             if (entity == null)
                 throw new Exception("entity not found");
@@ -46,101 +30,41 @@ namespace MvcRepository.Repository
             return entity;
         }
 
-        public async Task<(IEnumerable<TEntity> list, Pager pageDetails)> GetListAsync(int pg = 1, int pageSize = 20, string search = null, string[] includeProperties = null, CancellationToken cancellationToken = default)
+        public async Task<(IEnumerable<TEntity> list, Pager pageDetails)> GetListAsync(int pg = 1,
+            int pageSize = 20,
+            string? search = null,
+            string[]? includeProperties = null,
+            CancellationToken cancellationToken = default)
         {
-            var isnullOrEmpty = !string.IsNullOrEmpty(search);
-
-            IQueryable<TEntity> data = _table;
-
-            if (isnullOrEmpty)
+            if (!string.IsNullOrEmpty(search))
             {
-                var type = typeof(TEntity);
+                bool isDecimal = decimal.TryParse(search, out decimal decimalValue);
 
-                PropertyInfo[] properties;
+                bool isInt = int.TryParse(search, out _);
 
-                var prm = Expression.Parameter(type, "x");
-
-                var searchValue = Expression.Constant(search);
-
-                var isDecimal = decimal.TryParse(search, out var decimalValue);
-                var isInt = int.TryParse(search, out _);
-                var isDAteTime = DateTime.TryParse(search, out var resDateTime);
+                bool isDateTime = DateTime.TryParse(search, out var resDateTime);
 
                 if (isDecimal || isInt)
                 {
-                    var searchDecimalValue = Expression.Constant(decimalValue);
+                    Expression<Func<TEntity, bool>> predicate = GenerarateExpressions.Predicate<TEntity>(decimalValue, search);
 
-                    Expression converted = Expression.Convert(searchDecimalValue, typeof(object));
-
-                    var wholeNumberProps = type.GetProperties().Where(x => x.PropertyType == typeof(byte) || x.PropertyType == typeof(byte?) ||
-                                                                       x.PropertyType == typeof(short) || x.PropertyType == typeof(short?) ||
-                                                                       x.PropertyType == typeof(int) || x.PropertyType == typeof(int?)).ToArray();
-
-                    var toStringMethod = typeof(object).GetMethod("ToString");
-
-                    var containsMethod = typeof(string).GetMethod("Contains", new[] { typeof(string) });
-
-                    var wholeNumberMemberExpressions = wholeNumberProps.Select(prp => Expression.Property(prm, prp));
-
-                    var wholeNumbersToString = wholeNumberMemberExpressions.Select(mem => Expression.Call(mem, toStringMethod!));
-
-                    IEnumerable<Expression> wholeNumberExpressions = wholeNumbersToString.Select(expr => Expression.Call(expr, containsMethod!, searchValue));
-
-                    //Decimal
-                    properties = type.GetProperties().Where(x => x.PropertyType == typeof(decimal) || x.PropertyType == typeof(decimal?)).ToArray();
-
-                    var memberExpressions = properties.Select(prp => Expression.Property(prm, prp));
-
-                    var equalsMethod = typeof(object).GetMethod("Equals", new[] { typeof(object) });
-
-                    IEnumerable<Expression> expressions = memberExpressions.Select(mem => Expression.Call(mem, equalsMethod!, converted));
-
-
-                    var combined = expressions.Concat(wholeNumberExpressions);
-
-                    var body = combined.Aggregate((prev, current) => Expression.Or(prev, current));
-
-                    var lambda = Expression.Lambda<Func<TEntity, bool>>(body, prm);
-
-                    data = _table.Where(lambda);
+                    _table.Where(predicate);
                 }
-                else if (isDAteTime)
+                else if (isDateTime)
                 {
-                    var searchValueDateTime = Expression.Constant(resDateTime);
+                    Expression<Func<TEntity, bool>> predicate = GenerarateExpressions.Predicate<TEntity>(resDateTime);
 
-                    Expression converted = Expression.Convert(searchValueDateTime, typeof(object));
-
-                    properties = type.GetProperties().Where(x => x.PropertyType == typeof(DateTime) || x.PropertyType == typeof(DateTime?)).ToArray();
-
-                    var memberExpressions = properties.Select(prp => Expression.Property(prm, prp));
-
-                    var equalsMethod = typeof(object).GetMethod("Equals", new[] { typeof(object) });
-
-                    IEnumerable<Expression> expressions = memberExpressions.Select(mem => Expression.Call(mem, equalsMethod!, converted));
-
-                    var body = expressions.Aggregate((prev, current) => Expression.Or(prev, current));
-
-                    var lambda = Expression.Lambda<Func<TEntity, bool>>(body, prm);
-
-                    data = _table.Where(lambda);
+                    _table.Where(predicate);
                 }
                 else
                 {
-                    properties = type.GetProperties().Where(x => x.PropertyType == typeof(string)).ToArray();
+                    Expression<Func<TEntity, bool>> predicate = GenerarateExpressions.Predicate<TEntity>(search);
 
-                    var containsMethod = typeof(string).GetMethod("Contains", new[] { typeof(string) });
-
-                    IEnumerable<Expression> expressions = properties.Select(prp => Expression.Call(Expression.Property(prm, prp), containsMethod!, searchValue));
-
-                    var body = expressions.Aggregate((prev, current) => Expression.Or(prev, current));
-
-                    var lambda = Expression.Lambda<Func<TEntity, bool>>(body, prm);
-
-                    data = _table.Where(lambda);
+                    _table.Where(predicate);
                 }
             }
 
-            var items = data.Count();
+            var items = _table.Count();
 
             if (pg < 1)
                 pg = 1;
@@ -148,24 +72,11 @@ namespace MvcRepository.Repository
             if (pageSize < 1)
                 pageSize = 20;
 
-            var pager = new Pager(items, pg, pageSize);
+            Pager pager = new(items, pg, pageSize);
 
-            var skip = (pg - 1) * pageSize;
+            int skip = (pg - 1) * pageSize;
 
-            if (includeProperties is not null)
-            {
-                //IQueryable<T> query = _table;
-
-                foreach (var includeProperty in includeProperties)
-                {
-                    data = data.Include(includeProperty);
-                }
-
-                var res = await data.Skip(skip).Take(pager.PageSize).ToListAsync(cancellationToken);
-
-                return (list: res, pageDetails: pager);
-            }
-            var result = await data.Skip(skip).Take(pager.PageSize).ToListAsync(cancellationToken);
+            List<TEntity> result = await _table.ApplyIncludes(includeProperties).Skip(skip).Take(pager.PageSize).ToListAsync(cancellationToken);
 
             return (list: result, pageDetails: pager);
         }
@@ -173,17 +84,7 @@ namespace MvcRepository.Repository
 
         public async Task<IEnumerable<TEntity>> GetListAsync(string[] includeProperties, CancellationToken cancellationToken = default)
         {
-            if (includeProperties is not null)
-            {
-                IQueryable<TEntity> query = _table;
-
-                foreach (var includeProperty in includeProperties)
-                {
-                    query = query.Include(includeProperty);
-                }
-                return await query.ToListAsync(cancellationToken);
-            }
-            return await _table.ToListAsync(cancellationToken);
+            return await _table.ApplyIncludes(includeProperties).AsNoTracking().ToListAsync(cancellationToken: cancellationToken);
         }
 
         public async Task InsertAsync(TEntity entity, CancellationToken cancellationToken = default)
@@ -200,12 +101,10 @@ namespace MvcRepository.Repository
 
         public async Task DeleteAsync(int id, CancellationToken cancellationToken = default)
         {
-            var typeToDeleted = await GetByIdAsync(id, cancellationToken: cancellationToken);
-
-            if (typeToDeleted == null)
-                throw new ArgumentException();
+            var typeToDeleted = await GetByIdAsync(id, cancellationToken: cancellationToken) ?? throw new EntityNotFoundException();
 
             _table.Remove(typeToDeleted);
+
             await SaveAsync(cancellationToken);
         }
 
@@ -223,61 +122,22 @@ namespace MvcRepository.Repository
         public async Task<bool> CustomExists(int id)
         {
             var entities = _table.AsAsyncEnumerable();
+
             await foreach (var entity in entities)
             {
                 int pkValue = (int)(entity.GetType().GetProperties().ToDictionary(x => x.Name, x => x.GetValue(entity)).Values.ElementAt(0) ?? 0);
 
                 if (pkValue == id)
+
                     return true;
             }
+
             return false;
         }
 
         public IEnumerable<TEntity> GetList()
         {
             return _table.ToList();
-        }
-    }
-
-    public class Pager
-    {
-        public int TotalItems { get; private set; }
-        public int CurrentPage { get; private set; }
-        public int PageSize { get; private set; }
-        public int TotalPages { get; private set; }
-        public int StartPage { get; private set; }
-        public int EndPage { get; private set; }
-
-        public Pager() { }
-
-        public Pager(int totalItems, int page, int pageSize = 5)
-        {
-            int totalPages = (int)Math.Ceiling(totalItems / (decimal)pageSize);
-            int currentPage = page;
-            int startPage = currentPage - 5;
-            int endPage = currentPage + 4;
-
-            if (startPage <= 0)
-            {
-                endPage -= startPage - 1;
-                startPage = 1;
-            }
-
-            if (endPage > totalPages)
-            {
-                endPage = totalPages;
-                if (endPage > 10)
-                {
-                    startPage = endPage - 9;
-                }
-            }
-
-            TotalItems = totalItems;
-            CurrentPage = currentPage;
-            PageSize = pageSize;
-            TotalPages = totalPages;
-            StartPage = startPage;
-            EndPage = endPage;
         }
     }
 }
